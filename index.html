@@ -110,7 +110,7 @@
       const [isSaving, setIsSaving] = useState(false);
       const [saveSuccessMsg, setSaveSuccessMsg] = useState('');
       const [historyLoading, setHistoryLoading] = useState(false);
-      const [itemToDelete, setItemToDelete] = useState(null); // TAMBAHAN STATE UNTUK HAPUS
+      const [itemToDelete, setItemToDelete] = useState(null); 
 
       const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxxpvPkfPM88Xs5J2cJL6r112PKrahH6f0eTUJrc8ArJrjfzyY7sqdjnK-Zbm0vGvdF0A/exec";
 
@@ -430,13 +430,12 @@
 
         try {
           let apiKey = geminiApiKey ? geminiApiKey.trim().replace(/[^A-Za-z0-9_\-]/g, "") : "";
-          let finalTargetModel = "gemini-1.5-flash"; 
           const isCanvasEnv = typeof __app_id !== 'undefined';
           let data = null;
 
           if (isCanvasEnv) {
             apiKey = ""; 
-            finalTargetModel = "gemini-2.5-flash-preview-09-2025";
+            const finalTargetModel = "gemini-2.5-flash-preview-09-2025";
             const endpointUrl = `https://generativelanguage.googleapis.com/v1beta/models/${finalTargetModel}:generateContent?key=${apiKey}`;
             data = await fetchWithRetry(endpointUrl, {
                 method: 'POST',
@@ -445,12 +444,40 @@
             });
           } else {
             if (!apiKey) throw new Error("API Key Gemini tidak terbaca.");
-            const endpointUrl = `https://generativelanguage.googleapis.com/v1beta/models/${finalTargetModel}:generateContent?key=${apiKey}`;
-            data = await fetchWithRetry(endpointUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ contents: [{ parts: [{ text: `${systemPrompt}\n\nDATA:\nJudul: ${formData.title}\n\nIsi: ${formData.content}` }] }] })
-            });
+            
+            // PERBAIKAN: SMART FALLBACK LOOP UNTUK MENCEGAH 404 MODEL NOT FOUND DI VERCEL
+            const modelsToTry = [
+              "gemini-1.5-flash",
+              "gemini-1.5-flash-latest",
+              "gemini-1.5-pro",
+              "gemini-1.0-pro",
+              "gemini-pro"
+            ];
+
+            let isSuccess = false;
+            let lastFetchError = null;
+
+            for (const modelName of modelsToTry) {
+              try {
+                const endpointUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+                data = await fetchWithRetry(endpointUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ contents: [{ parts: [{ text: `${systemPrompt}\n\nDATA:\nJudul: ${formData.title}\n\nIsi: ${formData.content}` }] }] })
+                });
+                isSuccess = true;
+                break; // Keluar dari loop jika berhasil
+              } catch (err) {
+                lastFetchError = err;
+                console.warn(`Fallback: Model ${modelName} gagal, mencoba rute lain...`);
+                // Jika masalahnya Auth (401/403) atau Kuota Habis (429), tidak usah coba model lain
+                if (err.status === 401 || err.status === 403 || err.status === 429) break; 
+              }
+            }
+
+            if (!isSuccess) {
+              throw lastFetchError; // Lempar error terakhir jika semua model gagal
+            }
           }
           
           let textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -478,7 +505,13 @@
           }
         } catch (error) {
           const errMsg = error.message ? error.message.toUpperCase() : "SERVER SIBUK";
-          setErrorMsg(errMsg.includes("QUOTA") ? "MOHON MAAF SERVER AI SEDANG SIBUK, SILAHKAN COBA KEMBALI 5-10 MENIT LAGI" : `GAGAL: ${errMsg}`);
+          if (error.status === 429 || errMsg.includes("QUOTA") || errMsg.includes("EXCEEDED")) {
+             setErrorMsg("MOHON MAAF SERVER AI SEDANG SIBUK, SILAHKAN COBA KEMBALI 5-10 MENIT LAGI");
+          } else if (errMsg.includes("NOT FOUND")) {
+             setErrorMsg("GAGAL: MODEL AI TIDAK DITEMUKAN. PASTIKAN API KEY MEMILIKI AKSES.");
+          } else {
+             setErrorMsg(`GAGAL: ${errMsg}`);
+          }
           setTimeout(() => setErrorMsg(null), 12000); 
         } finally { setIsAnalyzing(false); }
       };
@@ -701,8 +734,8 @@
               <div className="flex items-center gap-4">
                 <div className="bg-slate-800 p-2.5 rounded-xl border border-slate-700 ring-1 ring-cyan-500/30 shadow-xl"><Cpu size={24} className="text-cyan-400" /></div>
                 <div>
-                  <h1 className="text-xl font-bold tracking-tight text-white drop-shadow-sm uppercase">MediaAnalytics<span className="text-cyan-400">.AI</span></h1>
-                  <p className="text-[10px] text-cyan-300/70 font-bold tracking-widest uppercase mt-0.5">Aplikasi Pembuat Analisis Isu Otomatis</p>
+                  <h1 className="text-xl font-bold tracking-tight text-white drop-shadow-sm">MediaAnalytics<span className="text-cyan-400">.AI</span></h1>
+                  <p className="text-[10px] text-cyan-300/70 font-bold tracking-widest mt-0.5">Aplikasi Pembuat Analisis Isu Otomatis</p>
                 </div>
               </div>
               <div className="flex items-center gap-5">
@@ -824,7 +857,10 @@
                           <div className="bg-blue-950/20 p-5 rounded-2xl border border-blue-900/30"><h5 className="text-blue-400 font-black mb-3 uppercase text-[9px] tracking-widest text-left">Opportunities</h5><ul className="text-slate-300 text-[11px] font-bold space-y-2 text-left">{result.swot_peluang.map((i,x)=><li key={x}>● {i}</li>)}</ul></div>
                           <div className="bg-red-950/20 p-5 rounded-2xl border border-red-900/30"><h5 className="text-red-400 font-black mb-3 uppercase text-[9px] tracking-widest text-left">Threats</h5><ul className="text-slate-300 text-[11px] font-bold space-y-2 text-left">{result.swot_ancaman.map((i,x)=><li key={x}>● {i}</li>)}</ul></div>
                         </div></section>
-                        <section className="space-y-3 text-left"><h4 className="text-xs font-black text-rose-500 uppercase tracking-[0.2em]">07 // Kesimpulan</h4><div className="bg-slate-800/40 p-6 rounded-2xl border border-slate-700/50 text-slate-300 text-sm leading-relaxed text-justify">{result.kesimpulan}</div></section>
+                        <section className="space-y-3 text-left"><h4 className="text-xs font-black text-green-500 uppercase tracking-[0.2em]">04 // Rekomendasi Kebijakan</h4><div className="bg-slate-800/40 p-6 rounded-2xl border border-slate-700/50"><ul className="text-slate-300 text-[11px] font-bold space-y-3 leading-relaxed">{result.kebijakan.map((i,x)=><li key={x} className="flex gap-3"><span className="text-green-500 shrink-0 font-mono">[{x+1}]</span> {i}</li>)}</ul></div></section>
+                        <section className="space-y-3 text-left"><h4 className="text-xs font-black text-purple-500 uppercase tracking-[0.2em]">05 // Strategi Komunikasi</h4><div className="bg-slate-800/40 p-6 rounded-2xl border border-slate-700/50"><ul className="text-slate-300 text-[11px] font-bold space-y-3 leading-relaxed">{result.strategi_komunikasi.map((i,x)=><li key={x} className="flex gap-3"><span className="text-purple-500 shrink-0 font-mono">[{x+1}]</span> {i}</li>)}</ul></div></section>
+                        <section className="space-y-3 text-left"><h4 className="text-xs font-black text-cyan-500 uppercase tracking-[0.2em]">06 // Rekomendasi Publikasi</h4><div className="bg-slate-800/40 p-6 rounded-2xl border border-slate-700/50"><ul className="text-slate-300 text-[11px] font-bold space-y-3 leading-relaxed">{result.rekomendasi_publikasi.map((i,x)=><li key={x} className="flex gap-3"><span className="text-cyan-500 shrink-0 font-mono">[{x+1}]</span> {i}</li>)}</ul></div></section>
+                        <section className="space-y-3 text-left"><h4 className="text-xs font-black text-rose-500 uppercase tracking-[0.2em]">07 // Kesimpulan</h4><div className="bg-slate-800/40 p-6 rounded-2xl border border-slate-700/50"><p className="text-slate-300 text-sm leading-relaxed text-justify">{result.kesimpulan}</p></div></section>
                       </div>
                     </div>
                   ) : (
