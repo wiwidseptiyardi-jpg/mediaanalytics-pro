@@ -207,7 +207,7 @@
                 email: userCredential.user.email,
                 uid: userCredential.user.uid,
                 role: 'guest',
-                tokens: 1, 
+                tokens: 1, // KESEMPATAN 1 TOKEN UNTUK TAMU
                 registeredAt: new Date().toISOString()
               };
               await setDoc(doc(db, 'users', userCredential.user.uid), newUserData);
@@ -430,12 +430,13 @@
 
         try {
           let apiKey = geminiApiKey ? geminiApiKey.trim().replace(/[^A-Za-z0-9_\-]/g, "") : "";
+          let finalTargetModel = "gemini-1.5-flash"; 
           const isCanvasEnv = typeof __app_id !== 'undefined';
           let data = null;
 
           if (isCanvasEnv) {
             apiKey = ""; 
-            const finalTargetModel = "gemini-2.5-flash-preview-09-2025";
+            finalTargetModel = "gemini-2.5-flash-preview-09-2025";
             const endpointUrl = `https://generativelanguage.googleapis.com/v1beta/models/${finalTargetModel}:generateContent?key=${apiKey}`;
             data = await fetchWithRetry(endpointUrl, {
                 method: 'POST',
@@ -445,39 +446,35 @@
           } else {
             if (!apiKey) throw new Error("API Key Gemini tidak terbaca.");
             
-            // PERBAIKAN: SMART FALLBACK LOOP UNTUK MENCEGAH 404 MODEL NOT FOUND DI VERCEL
-            const modelsToTry = [
-              "gemini-1.5-flash",
-              "gemini-1.5-flash-latest",
-              "gemini-1.5-pro",
-              "gemini-1.0-pro",
-              "gemini-pro"
-            ];
-
-            let isSuccess = false;
-            let lastFetchError = null;
-
-            for (const modelName of modelsToTry) {
-              try {
-                const endpointUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-                data = await fetchWithRetry(endpointUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ contents: [{ parts: [{ text: `${systemPrompt}\n\nDATA:\nJudul: ${formData.title}\n\nIsi: ${formData.content}` }] }] })
-                });
-                isSuccess = true;
-                break; // Keluar dari loop jika berhasil
-              } catch (err) {
-                lastFetchError = err;
-                console.warn(`Fallback: Model ${modelName} gagal, mencoba rute lain...`);
-                // Jika masalahnya Auth (401/403) atau Kuota Habis (429), tidak usah coba model lain
-                if (err.status === 401 || err.status === 403 || err.status === 429) break; 
-              }
+            // KEMBALI MENGGUNAKAN AUTO-SCANNER YANG BERHASIL DI VERCEL SEBELUMNYA
+            try {
+                const modelsRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+                if (modelsRes.ok) {
+                    const modelsData = await modelsRes.json();
+                    if (modelsData.models) {
+                        const availableModels = modelsData.models
+                            .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent'))
+                            .map(m => m.name.replace('models/', ''));
+                        
+                        if (availableModels.length > 0) {
+                            if (availableModels.includes('gemini-1.5-flash')) finalTargetModel = 'gemini-1.5-flash';
+                            else if (availableModels.includes('gemini-1.5-flash-latest')) finalTargetModel = 'gemini-1.5-flash-latest';
+                            else if (availableModels.includes('gemini-1.5-pro')) finalTargetModel = 'gemini-1.5-pro';
+                            else if (availableModels.includes('gemini-pro')) finalTargetModel = 'gemini-pro';
+                            else finalTargetModel = availableModels[0]; 
+                        }
+                    }
+                }
+            } catch (scannerErr) {
+                 console.warn("Scanner model gagal jaringan, mencoba fallback default.");
             }
 
-            if (!isSuccess) {
-              throw lastFetchError; // Lempar error terakhir jika semua model gagal
-            }
+            const endpointUrl = `https://generativelanguage.googleapis.com/v1beta/models/${finalTargetModel}:generateContent?key=${apiKey}`;
+            data = await fetchWithRetry(endpointUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ contents: [{ parts: [{ text: `${systemPrompt}\n\nDATA:\nJudul: ${formData.title}\n\nIsi: ${formData.content}` }] }] })
+            });
           }
           
           let textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -507,8 +504,6 @@
           const errMsg = error.message ? error.message.toUpperCase() : "SERVER SIBUK";
           if (error.status === 429 || errMsg.includes("QUOTA") || errMsg.includes("EXCEEDED")) {
              setErrorMsg("MOHON MAAF SERVER AI SEDANG SIBUK, SILAHKAN COBA KEMBALI 5-10 MENIT LAGI");
-          } else if (errMsg.includes("NOT FOUND")) {
-             setErrorMsg("GAGAL: MODEL AI TIDAK DITEMUKAN. PASTIKAN API KEY MEMILIKI AKSES.");
           } else {
              setErrorMsg(`GAGAL: ${errMsg}`);
           }
