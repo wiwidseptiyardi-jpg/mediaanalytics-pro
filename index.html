@@ -207,7 +207,7 @@
                 email: userCredential.user.email,
                 uid: userCredential.user.uid,
                 role: 'guest',
-                tokens: 1, // KESEMPATAN 1 TOKEN UNTUK TAMU
+                tokens: 1, 
                 registeredAt: new Date().toISOString()
               };
               await setDoc(doc(db, 'users', userCredential.user.uid), newUserData);
@@ -391,7 +391,7 @@
         if (viewMode === 'history' && user) { loadSavedAnalyses(); }
       }, [viewMode, user]);
 
-      // --- AI ANALYSIS ---
+      // --- AI ANALYSIS (ULTIMATE FALLBACK LOOP) ---
       const fetchWithRetry = async (url, options, retries = 3) => {
         const delays = [1000, 2000, 4000];
         let lastError = null;
@@ -430,54 +430,72 @@
 
         try {
           let apiKey = geminiApiKey ? geminiApiKey.trim().replace(/[^A-Za-z0-9_\-]/g, "") : "";
-          let finalTargetModel = "gemini-1.5-flash"; 
           const isCanvasEnv = typeof __app_id !== 'undefined';
           let data = null;
 
+          const payload = {
+              contents: [{ parts: [{ text: `${systemPrompt}\n\nDATA:\nJudul: ${formData.title}\n\nIsi: ${formData.content}` }] }]
+          };
+
           if (isCanvasEnv) {
             apiKey = ""; 
-            finalTargetModel = "gemini-2.5-flash-preview-09-2025";
+            const finalTargetModel = "gemini-2.5-flash-preview-09-2025";
             const endpointUrl = `https://generativelanguage.googleapis.com/v1beta/models/${finalTargetModel}:generateContent?key=${apiKey}`;
             data = await fetchWithRetry(endpointUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ contents: [{ parts: [{ text: `${systemPrompt}\n\nDATA:\nJudul: ${formData.title}\n\nIsi: ${formData.content}` }] }] })
+                body: JSON.stringify(payload)
             });
           } else {
             if (!apiKey) throw new Error("API Key Gemini tidak terbaca.");
             
-            // KEMBALI MENGGUNAKAN AUTO-SCANNER YANG BERHASIL DI VERCEL SEBELUMNYA
-            try {
-                const modelsRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
-                if (modelsRes.ok) {
-                    const modelsData = await modelsRes.json();
-                    if (modelsData.models) {
-                        const availableModels = modelsData.models
-                            .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent'))
-                            .map(m => m.name.replace('models/', ''));
-                        
-                        if (availableModels.length > 0) {
-                            if (availableModels.includes('gemini-1.5-flash')) finalTargetModel = 'gemini-1.5-flash';
-                            else if (availableModels.includes('gemini-1.5-flash-latest')) finalTargetModel = 'gemini-1.5-flash-latest';
-                            else if (availableModels.includes('gemini-1.5-pro')) finalTargetModel = 'gemini-1.5-pro';
-                            else if (availableModels.includes('gemini-pro')) finalTargetModel = 'gemini-pro';
-                            else finalTargetModel = availableModels[0]; 
-                        }
-                    }
-                }
-            } catch (scannerErr) {
-                 console.warn("Scanner model gagal jaringan, mencoba fallback default.");
+            // ULTIMATE FALLBACK LOOP:
+            // Sistem akan mencoba model satu per satu tanpa menggunakan 'GET /models' yang rawan diblokir.
+            // Jika model 1.5-flash tidak ada (404), ia langsung melompat ke model universal.
+            const modelsToTry = [
+              "gemini-1.5-flash",
+              "gemini-1.5-flash-latest",
+              "gemini-1.5-pro",
+              "gemini-pro",
+              "gemini-1.0-pro"
+            ];
+
+            let success = false;
+            let lastErrorMsg = "";
+
+            for (const model of modelsToTry) {
+               try {
+                 const endpointUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+                 const response = await fetch(endpointUrl, {
+                     method: 'POST',
+                     headers: { 'Content-Type': 'application/json' },
+                     body: JSON.stringify(payload)
+                 });
+                 
+                 if (!response.ok) {
+                    const errData = await response.json();
+                    lastErrorMsg = errData.error?.message || `HTTP Error ${response.status}`;
+                    console.warn(`Model ${model} ditolak: ${lastErrorMsg}`);
+                    continue; // Jika gagal (seperti 404 NOT FOUND), langsung coba model berikutnya
+                 }
+                 
+                 data = await response.json();
+                 success = true;
+                 break; // Berhasil! Keluar dari loop pencarian
+               } catch (err) {
+                 lastErrorMsg = err.message;
+                 console.warn(`Fetch error pada model ${model}:`, err);
+               }
             }
 
-            const endpointUrl = `https://generativelanguage.googleapis.com/v1beta/models/${finalTargetModel}:generateContent?key=${apiKey}`;
-            data = await fetchWithRetry(endpointUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ contents: [{ parts: [{ text: `${systemPrompt}\n\nDATA:\nJudul: ${formData.title}\n\nIsi: ${formData.content}` }] }] })
-            });
+            if (!success) {
+               throw new Error(lastErrorMsg || "Semua model AI gagal diakses.");
+            }
           }
           
           let textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (!textResponse) throw new Error("Respons AI kosong");
+          
           const jsonMatch = textResponse.match(/\{[\s\S]*\}/);
           const parsedData = JSON.parse(jsonMatch ? jsonMatch[0] : textResponse);
           
@@ -499,10 +517,11 @@
 
           if (userData?.role === 'guest' && userData.tokens > 0) {
             await updateDoc(doc(db, 'users', user.uid), { tokens: userData.tokens - 1 });
+            setUserData(prev => ({ ...prev, tokens: prev.tokens - 1 }));
           }
         } catch (error) {
           const errMsg = error.message ? error.message.toUpperCase() : "SERVER SIBUK";
-          if (error.status === 429 || errMsg.includes("QUOTA") || errMsg.includes("EXCEEDED")) {
+          if (errMsg.includes("QUOTA") || errMsg.includes("EXCEEDED") || errMsg.includes("429")) {
              setErrorMsg("MOHON MAAF SERVER AI SEDANG SIBUK, SILAHKAN COBA KEMBALI 5-10 MENIT LAGI");
           } else {
              setErrorMsg(`GAGAL: ${errMsg}`);
@@ -536,6 +555,27 @@
         const element = document.createElement('div');
         element.innerHTML = `<div style="padding:20px; font-family:Arial;"><h2>${formData.title}</h2><p>${formData.date}</p><hr/><p>${result.resume}</p></div>`;
         window.html2pdf().from(element).save(`Analisis_${formData.date}.pdf`);
+      };
+
+      const renderDeleteModal = () => {
+        if (!itemToDelete) return null;
+        return (
+          <div className="fixed inset-0 z-[100] bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="bg-[#111827] border border-slate-700/50 rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl flex flex-col relative animate-in zoom-in-95">
+              <div className="p-6 text-center">
+                <div className="w-16 h-16 bg-red-500/20 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <Trash2 size={32} />
+                </div>
+                <h3 className="text-xl font-black text-white uppercase tracking-widest mb-2">Hapus Riwayat?</h3>
+                <p className="text-slate-400 text-sm font-medium leading-relaxed">Tindakan ini tidak dapat dibatalkan. Riwayat analisis ini akan dihapus secara permanen.</p>
+              </div>
+              <div className="flex border-t border-slate-700/50">
+                <button onClick={() => setItemToDelete(null)} className="flex-1 py-4 text-slate-300 font-bold hover:bg-slate-800 transition-colors uppercase tracking-widest text-xs">Batal</button>
+                <button onClick={executeDelete} className="flex-1 py-4 text-red-400 font-black hover:bg-red-900/40 transition-colors uppercase tracking-widest text-xs border-l border-slate-700/50">Ya, Hapus</button>
+              </div>
+            </div>
+          </div>
+        );
       };
 
       const renderUpgradeModal = () => {
@@ -597,8 +637,8 @@
 
       if (!isSystemInit) {
         return (
-          <div className="min-h-screen bg-slate-950 flex items-center justify-center relative overflow-hidden">
-            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-cyan-600/20 rounded-full blur-[120px]"></div>
+          <div className="min-h-screen bg-[#020617] flex items-center justify-center">
+            <Cpu size={48} className="text-cyan-400 animate-pulse" />
           </div>
         );
       }
