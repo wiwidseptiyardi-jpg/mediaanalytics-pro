@@ -496,8 +496,11 @@
           });
 
           if (userData?.role === 'guest' && userData.tokens > 0) {
-            await updateDoc(doc(db, 'users', user.uid), { tokens: userData.tokens - 1 });
-            setUserData(prev => ({ ...prev, tokens: prev.tokens - 1 }));
+            // Menggunakan Math.max agar token dibatasi paling minimal 0 (tidak bisa minus)
+            const newTokens = Math.max(0, userData.tokens - 1);
+            await updateDoc(doc(db, 'users', user.uid), { tokens: newTokens });
+            // Pembaruan UI manual (setUserData) dihapus untuk mencegah bug tampilan -1 
+            // akibat double-click. Firebase onSnapshot akan mengurus update UI secara real-time.
           }
         } catch (error) {
           const errMsg = error.message ? error.message.toUpperCase() : "SERVER SIBUK";
