@@ -41,6 +41,7 @@
     {
       "imports": {
         "react": "https://esm.sh/react@18.2.0",
+        "react/jsx-runtime": "https://esm.sh/react@18.2.0/jsx-runtime",
         "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
         "lucide-react": "https://esm.sh/lucide-react@0.344.0",
         "firebase/app": "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js",
@@ -496,11 +497,8 @@
           });
 
           if (userData?.role === 'guest' && userData.tokens > 0) {
-            // Menggunakan Math.max agar token dibatasi paling minimal 0 (tidak bisa minus)
             const newTokens = Math.max(0, userData.tokens - 1);
             await updateDoc(doc(db, 'users', user.uid), { tokens: newTokens });
-            // Pembaruan UI manual (setUserData) dihapus untuk mencegah bug tampilan -1 
-            // akibat double-click. Firebase onSnapshot akan mengurus update UI secara real-time.
           }
         } catch (error) {
           const errMsg = error.message ? error.message.toUpperCase() : "SERVER SIBUK";
