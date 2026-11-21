@@ -427,7 +427,21 @@
         setIsAnalyzing(true);
         setErrorMsg(null);
         
-        const systemPrompt = `Analis Media & Kebijakan Publik. Bedah berita ringkas, tajam, EYD baku. Output JSON: {"resume":"string","analisis_deskriptif":"string","swot_kekuatan":["string"],"swot_kelemahan":["string"],"swot_peluang":["string"],"swot_ancaman":["string"],"kebijakan":["string"],"strategi_komunikasi":["string"],"rekomendasi_publikasi":["string"],"kesimpulan":"string"}`;
+        const systemPrompt = `Anda adalah Analis Media Senior & Konsultan Kebijakan Publik profesional. Bedah berita secara komprehensif, mendalam, tajam, dan terstruktur dalam Bahasa Indonesia baku (EYD).
+WAJIB mengisi seluruh 10 kunci JSON secara detail dan lengkap (minimal 2 paragraf padat untuk narasi dan 3-4 poin komprehensif dengan judul/penjelasan untuk setiap daftar).
+Struktur JSON wajib:
+{
+  "resume": "Ringkasan eksekutif 5W+1H secara lengkap dan runtut (2 paragraf)",
+  "analisis_deskriptif": "Bedah konteks isu, aktor terlibat, sentimen publik, dan dampak sosial-politik-ekonomi secara mendalam (2-3 paragraf)",
+  "swot_kekuatan": ["Poin Kekuatan: Penjelasan detail"],
+  "swot_kelemahan": ["Poin Kelemahan: Penjelasan detail"],
+  "swot_peluang": ["Poin Peluang: Penjelasan detail"],
+  "swot_ancaman": ["Poin Ancaman: Penjelasan detail"],
+  "kebijakan": ["Langkah Kebijakan: Penjelasan konkret dan terukur"],
+  "strategi_komunikasi": ["Strategi Komunikasi: Pesan kunci, target audiens, dan mitigasi narasi"],
+  "rekomendasi_publikasi": ["Kanal & Format Publikasi: Sudut pandang (angle) rilis media dan waktu tayang"],
+  "kesimpulan": "Sintesis akhir dan urgensi tindak lanjut (1-2 paragraf tegas)"
+}`;
 
         try {
           let apiKey = geminiApiKey ? geminiApiKey.trim().replace(/[^A-Za-z0-9_\-\.]/g, "") : "";
@@ -435,13 +449,13 @@
           let data = null;
 
           // Batasi panjang teks berita agar payload ringan dan tidak memicu timeout/limit di Vercel
-          const safeContent = formData.content.length > 12000 
-            ? formData.content.slice(0, 12000) + "\n[...teks dipotong otomatis untuk efisiensi proses...]"
+          const safeContent = formData.content.length > 14000 
+            ? formData.content.slice(0, 14000) + "\n[...teks dipotong otomatis untuk efisiensi proses...]"
             : formData.content;
-          const promptText = `${systemPrompt}\n\nJudul: ${formData.title}\nIsi: ${safeContent}`;
+          const promptText = `${systemPrompt}\n\nJudul Isu: ${formData.title}\nTanggal: ${formData.date}\nIsi Berita:\n${safeContent}`;
 
           // Helper fetch dengan batas waktu (timeout) agar tidak menggantung lama di Vercel
-          const fetchWithTimeout = async (url, options, timeoutMs = 15000) => {
+          const fetchWithTimeout = async (url, options, timeoutMs = 25000) => {
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), timeoutMs);
             try {
@@ -459,7 +473,7 @@
               return await res.json();
             } catch (err) {
               if (err.name === 'AbortError') {
-                const timeoutErr = new Error("Waktu respons server habis (Timeout)");
+                const timeoutErr = new Error("Waktu respons server habis (Timeout). Silakan coba lagi.");
                 timeoutErr.status = 408;
                 throw timeoutErr;
               }
@@ -475,8 +489,14 @@
             data = await fetchWithTimeout(endpointUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ contents: [{ parts: [{ text: promptText }] }] })
-            }, 25000);
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: promptText }] }],
+                generationConfig: {
+                  responseMimeType: "application/json",
+                  temperature: 0.3
+                }
+              })
+            }, 30000);
           } else {
             // Jika API Key belum sempat terambil saat halaman baru dimuat, coba ambil ulang sekali dari Apps Script
             if (!apiKey) {
@@ -503,7 +523,7 @@
             ];
 
             let candidateModels = [...fallbackOrder];
-            const cachedListRaw = sessionStorage.getItem('availableGeminiModels_v4');
+            const cachedListRaw = sessionStorage.getItem('availableGeminiModels_v5');
             if (cachedListRaw) {
               try {
                 const parsedCache = JSON.parse(cachedListRaw);
@@ -525,7 +545,7 @@
                     const prioritized = fallbackOrder.filter(m => supported.includes(m));
                     const others = supported.filter(m => !prioritized.includes(m));
                     candidateModels = [...prioritized, ...others];
-                    sessionStorage.setItem('availableGeminiModels_v4', JSON.stringify(candidateModels));
+                    sessionStorage.setItem('availableGeminiModels_v5', JSON.stringify(candidateModels));
                   }
                 }
               } catch (_) {
@@ -533,7 +553,7 @@
               }
             }
 
-            // Coba maksimal 3 model teratas agar proses di Vercel tetap cepat (tidak berlama-lama di loop)
+            // Coba maksimal 3 model teratas agar proses di Vercel tetap cepat & andal
             const modelsToAttempt = candidateModels.slice(0, 3);
             let lastModelError = null;
 
@@ -552,7 +572,7 @@
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify(payload)
-                }, 15000);
+                }, 22000);
                 break;
               } catch (err) {
                 lastModelError = err;
@@ -577,7 +597,17 @@
           const cleanJson = jsonMatch ? jsonMatch[0] : textResponse.replace(/```json/gi, '').replace(/```/g, '').trim();
           const parsedData = JSON.parse(cleanJson);
           
-          const parseToStringArray = (arr) => Array.isArray(arr) && arr.length > 0 ? arr.map(String) : ["-"];
+          // Mengonversi elemen array baik berupa string maupun objek (misal {poin, penjelasan}) menjadi format rapi
+          const parseToStringArray = (arr) => {
+            if (!Array.isArray(arr) || arr.length === 0) return ["-"];
+            return arr.map(item => {
+              if (typeof item === 'object' && item !== null) {
+                const vals = Object.values(item).filter(v => v !== null && v !== undefined);
+                return vals.length > 1 ? `${vals[0]}: ${vals.slice(1).join(' - ')}` : String(vals[0] || "-");
+              }
+              return String(item);
+            });
+          };
 
           setResult({
             resume: String(parsedData.resume || "Tidak tersedia."),
@@ -617,12 +647,12 @@
       const getFormattedText = () => {
         if (!result) return '';
         const formatList = (arr) => (arr || []).map(i => `- ${i}`).join('\n');
-        return `MediaAnalytics.AI - ${formData.title}\n\n1. RESUME BERITA:\n${result.resume}\n\n2. ANALISIS SWOT:\n[S]\n${formatList(result.swot_kekuatan)}\n\n[W]\n${formatList(result.swot_kelemahan)}\n\n[O]\n${formatList(result.swot_peluang)}\n\n[T]\n${formatList(result.swot_ancaman)}\n\n4. REKOMENDASI:\n${formatList(result.kebijakan)}\n\n5. KESIMPULAN:\n${result.kesimpulan}`;
+        return `MediaAnalytics.AI - ${formData.title}\nTanggal: ${formData.date}\n\n1. RESUME BERITA:\n${result.resume}\n\n2. ANALISIS DESKRIPTIF:\n${result.analisis_deskriptif}\n\n3. ANALISIS SWOT:\n[Strengths / Kekuatan]\n${formatList(result.swot_kekuatan)}\n\n[Weaknesses / Kelemahan]\n${formatList(result.swot_kelemahan)}\n\n[Opportunities / Peluang]\n${formatList(result.swot_peluang)}\n\n[Threats / Ancaman]\n${formatList(result.swot_ancaman)}\n\n4. REKOMENDASI KEBIJAKAN:\n${formatList(result.kebijakan)}\n\n5. STRATEGI KOMUNIKASI:\n${formatList(result.strategi_komunikasi)}\n\n6. REKOMENDASI PUBLIKASI:\n${formatList(result.rekomendasi_publikasi)}\n\n7. KESIMPULAN:\n${result.kesimpulan}`;
       };
 
       const downloadWord = () => {
         const formatListHtml = (arr) => `<ul>${(arr || []).map(i => `<li>${i}</li>`).join('')}</ul>`;
-        const content = `<html><body><h2>${formData.title}</h2><p><em>${formData.date}</em></p><h3>1. Resume</h3><p>${result.resume}</p><h3>2. SWOT</h3>${formatListHtml(result.swot_kekuatan)}</body></html>`;
+        const content = `<html><head><meta charset="utf-8"></head><body style="font-family:Arial,sans-serif;line-height:1.6;"><h2>${formData.title}</h2><p><em>Tanggal: ${formData.date}</em></p><hr/><h3>1. Resume Berita</h3><p>${result.resume}</p><h3>2. Analisis Deskriptif</h3><p>${result.analisis_deskriptif}</p><h3>3. Analisis SWOT</h3><h4>Strengths (Kekuatan)</h4>${formatListHtml(result.swot_kekuatan)}<h4>Weaknesses (Kelemahan)</h4>${formatListHtml(result.swot_kelemahan)}<h4>Opportunities (Peluang)</h4>${formatListHtml(result.swot_peluang)}<h4>Threats (Ancaman)</h4>${formatListHtml(result.swot_ancaman)}<h3>4. Rekomendasi Kebijakan</h3>${formatListHtml(result.kebijakan)}<h3>5. Strategi Komunikasi</h3>${formatListHtml(result.strategi_komunikasi)}<h3>6. Rekomendasi Publikasi</h3>${formatListHtml(result.rekomendasi_publikasi)}<h3>7. Kesimpulan</h3><p>${result.kesimpulan}</p></body></html>`;
         const link = document.createElement('a');
         link.href = URL.createObjectURL(new Blob([content], { type: 'application/msword' }));
         link.download = `Analisis_${formData.date}.doc`;
@@ -630,8 +660,23 @@
       };
 
       const downloadPDF = () => {
+        const formatListHtml = (arr) => `<ul style="margin:6px 0 12px 18px;">${(arr || []).map(i => `<li style="margin-bottom:4px;">${i}</li>`).join('')}</ul>`;
         const element = document.createElement('div');
-        element.innerHTML = `<div style="padding:20px; font-family:Arial;"><h2>${formData.title}</h2><p>${formData.date}</p><hr/><p>${result.resume}</p></div>`;
+        element.innerHTML = `<div style="padding:24px; font-family:Arial,sans-serif; color:#111; line-height:1.5; font-size:12px;">
+          <h2 style="margin-bottom:4px;">${formData.title}</h2>
+          <p style="color:#555; margin-top:0;">Tanggal: ${formData.date}</p><hr/>
+          <h3>1. Resume Berita</h3><p style="text-align:justify;">${result.resume}</p>
+          <h3>2. Analisis Deskriptif</h3><p style="text-align:justify;">${result.analisis_deskriptif}</p>
+          <h3>3. Analisis SWOT</h3>
+          <strong>Strengths (Kekuatan):</strong>${formatListHtml(result.swot_kekuatan)}
+          <strong>Weaknesses (Kelemahan):</strong>${formatListHtml(result.swot_kelemahan)}
+          <strong>Opportunities (Peluang):</strong>${formatListHtml(result.swot_peluang)}
+          <strong>Threats (Ancaman):</strong>${formatListHtml(result.swot_ancaman)}
+          <h3>4. Rekomendasi Kebijakan</h3>${formatListHtml(result.kebijakan)}
+          <h3>5. Strategi Komunikasi</h3>${formatListHtml(result.strategi_komunikasi)}
+          <h3>6. Rekomendasi Publikasi</h3>${formatListHtml(result.rekomendasi_publikasi)}
+          <h3>7. Kesimpulan</h3><p style="text-align:justify;">${result.kesimpulan}</p>
+        </div>`;
         window.html2pdf().from(element).save(`Analisis_${formData.date}.pdf`);
       };
 
