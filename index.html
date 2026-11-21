@@ -427,140 +427,161 @@
         setIsAnalyzing(true);
         setErrorMsg(null);
         
-        // Prompt dipadatkan agar diproses AI jauh lebih cepat namun tetap tajam & sesuai EYD
         const systemPrompt = `Analis Media & Kebijakan Publik. Bedah berita ringkas, tajam, EYD baku. Output JSON: {"resume":"string","analisis_deskriptif":"string","swot_kekuatan":["string"],"swot_kelemahan":["string"],"swot_peluang":["string"],"swot_ancaman":["string"],"kebijakan":["string"],"strategi_komunikasi":["string"],"rekomendasi_publikasi":["string"],"kesimpulan":"string"}`;
 
         try {
           let apiKey = geminiApiKey ? geminiApiKey.trim().replace(/[^A-Za-z0-9_\-\.]/g, "") : "";
-          let finalTargetModel = "gemini-3.8-flash"; 
           const isCanvasEnv = typeof __app_id !== 'undefined';
           let data = null;
 
+          // Batasi panjang teks berita agar payload ringan dan tidak memicu timeout/limit di Vercel
+          const safeContent = formData.content.length > 12000 
+            ? formData.content.slice(0, 12000) + "\n[...teks dipotong otomatis untuk efisiensi proses...]"
+            : formData.content;
+          const promptText = `${systemPrompt}\n\nJudul: ${formData.title}\nIsi: ${safeContent}`;
+
+          // Helper fetch dengan batas waktu (timeout) agar tidak menggantung lama di Vercel
+          const fetchWithTimeout = async (url, options, timeoutMs = 15000) => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeoutMs);
+            try {
+              const res = await fetch(url, { ...options, signal: controller.signal });
+              if (!res.ok) {
+                let errMsg = `E${res.status}`;
+                try {
+                  const errJson = await res.json();
+                  if (errJson.error && errJson.error.message) errMsg = errJson.error.message;
+                } catch (_) {}
+                const err = new Error(errMsg);
+                err.status = res.status;
+                throw err;
+              }
+              return await res.json();
+            } catch (err) {
+              if (err.name === 'AbortError') {
+                const timeoutErr = new Error("Waktu respons server habis (Timeout)");
+                timeoutErr.status = 408;
+                throw timeoutErr;
+              }
+              throw err;
+            } finally {
+              clearTimeout(timer);
+            }
+          };
+
           if (isCanvasEnv) {
-            apiKey = ""; 
-            finalTargetModel = "gemini-2.5-flash-preview-09-2025";
-            const endpointUrl = `https://generativelanguage.googleapis.com/v1beta/models/${finalTargetModel}:generateContent?key=${apiKey}`;
-            data = await fetchWithRetry(endpointUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ contents: [{ parts: [{ text: `${systemPrompt}\n\nJudul: ${formData.title}\nIsi: ${formData.content}` }] }] })
-            });
+            apiKey = "";
+            const endpointUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+            data = await fetchWithTimeout(endpointUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ contents: [{ parts: [{ text: promptText }] }] })
+            }, 25000);
           } else {
-            if (!apiKey) throw new Error("API Key Gemini tidak terbaca.");
-            
-            // Kumpulkan daftar model yang tersedia di akun API Key ini
-            let candidateModels = [];
-            const preferredModels = [
-              'gemini-3.8-flash-lite',
-              'gemini-3.8-flash',
+            // Jika API Key belum sempat terambil saat halaman baru dimuat, coba ambil ulang sekali dari Apps Script
+            if (!apiKey) {
+              try {
+                const cfgRes = await fetchWithTimeout(`${SCRIPT_URL}?action=getConfig&t=${Date.now()}`, {}, 8000);
+                if (cfgRes && cfgRes.geminiApiKey) {
+                  apiKey = cfgRes.geminiApiKey.trim().replace(/[^A-Za-z0-9_\-\.]/g, "");
+                  setGeminiApiKey(apiKey);
+                }
+              } catch (_) {}
+            }
+
+            if (!apiKey) {
+              throw new Error("API Key Gemini belum terbaca. Periksa pengaturan Google Apps Script.");
+            }
+
+            // Urutan model prioritas cepat & stabil untuk analisis teks/JSON
+            const fallbackOrder = [
               'gemini-3.5-flash-lite',
-              'gemini-3.5-flash',
-              'gemini-3-flash',
+              'gemini-3.8-flash',
+              'gemini-3.1-flash-lite',
               'gemini-2.5-flash-lite',
-              'gemini-2.5-flash',
-              'gemini-1.5-flash'
+              'gemini-2.5-flash'
             ];
 
-            let cachedListRaw = sessionStorage.getItem('availableGeminiModels_v3');
+            let candidateModels = [...fallbackOrder];
+            const cachedListRaw = sessionStorage.getItem('availableGeminiModels_v4');
             if (cachedListRaw) {
               try {
-                candidateModels = JSON.parse(cachedListRaw);
-              } catch (e) {
-                candidateModels = [];
-              }
-            }
-
-            if (!Array.isArray(candidateModels) || candidateModels.length === 0) {
+                const parsedCache = JSON.parse(cachedListRaw);
+                if (Array.isArray(parsedCache) && parsedCache.length > 0) {
+                  candidateModels = parsedCache;
+                }
+              } catch (_) {}
+            } else {
               try {
-                const modelsRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
-                if (modelsRes.ok) {
-                  const modelsData = await modelsRes.json();
-                  if (modelsData.models) {
-                    const availableModels = modelsData.models
-                      .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent'))
-                      .map(m => m.name.replace('models/', ''));
+                const modelsData = await fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`, {}, 6000);
+                if (modelsData && Array.isArray(modelsData.models)) {
+                  const supported = modelsData.models
+                    .filter(m => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'))
+                    .map(m => m.name.replace('models/', ''))
+                    // Hindari model khusus audio/TTS/live/image yang tidak cocok untuk JSON analisis teks
+                    .filter(name => !/tts|live|image|veo|lyria|embedding/i.test(name));
 
-                    if (availableModels.length > 0) {
-                      const orderedPreferred = preferredModels.filter(m => availableModels.includes(m));
-                      const remainingModels = availableModels.filter(m => !orderedPreferred.includes(m));
-                      candidateModels = [...orderedPreferred, ...remainingModels];
-                      sessionStorage.setItem('availableGeminiModels_v3', JSON.stringify(candidateModels));
-                    }
+                  if (supported.length > 0) {
+                    const prioritized = fallbackOrder.filter(m => supported.includes(m));
+                    const others = supported.filter(m => !prioritized.includes(m));
+                    candidateModels = [...prioritized, ...others];
+                    sessionStorage.setItem('availableGeminiModels_v4', JSON.stringify(candidateModels));
                   }
                 }
-              } catch (scannerErr) {
-                console.warn("Scanner model gagal jaringan, menggunakan daftar cadangan.");
+              } catch (_) {
+                // Tetap lanjut memakai daftar model bawaan tanpa membuang waktu
               }
             }
 
-            // Fallback daftar model jika scanner gagal atau cache kosong
-            if (!Array.isArray(candidateModels) || candidateModels.length === 0) {
-              candidateModels = preferredModels;
-            }
-
+            // Coba maksimal 3 model teratas agar proses di Vercel tetap cepat (tidak berlama-lama di loop)
+            const modelsToAttempt = candidateModels.slice(0, 3);
             let lastModelError = null;
-            for (const modelName of candidateModels) {
-              const endpointUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
-              // Payload dengan thinkingBudget: 0 untuk mematikan jeda berpikir AI agar super cepat
-              const fastPayload = {
-                contents: [{ parts: [{ text: `${systemPrompt}\n\nJudul: ${formData.title}\nIsi: ${formData.content}` }] }],
+            for (const modelName of modelsToAttempt) {
+              const endpointUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+              const payload = {
+                contents: [{ parts: [{ text: promptText }] }],
                 generationConfig: {
                   responseMimeType: "application/json",
-                  temperature: 0.3,
-                  thinkingConfig: { thinkingBudget: 0 }
+                  temperature: 0.3
                 }
               };
 
               try {
-                data = await fetchWithRetry(endpointUrl, {
+                data = await fetchWithTimeout(endpointUrl, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify(fastPayload)
-                }, 1);
-                finalTargetModel = modelName;
+                  body: JSON.stringify(payload)
+                }, 15000);
                 break;
               } catch (err) {
-                // Fallback otomatis jika model spesifik tidak mendukung thinkingConfig
-                if (err.status === 400) {
-                  try {
-                    const fallbackPayload = {
-                      contents: [{ parts: [{ text: `${systemPrompt}\n\nJudul: ${formData.title}\nIsi: ${formData.content}` }] }],
-                      generationConfig: {
-                        responseMimeType: "application/json",
-                        temperature: 0.3
-                      }
-                    };
-                    data = await fetchWithRetry(endpointUrl, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify(fallbackPayload)
-                    }, 1);
-                    finalTargetModel = modelName;
-                    break;
-                  } catch (retryErr) {
-                    lastModelError = retryErr;
-                  }
-                } else {
-                  lastModelError = err;
+                lastModelError = err;
+                // Jika error 401/403 (API key tidak valid/diblokir), hentikan loop segera
+                if (err.status === 401 || err.status === 403) {
+                  break;
                 }
               }
             }
 
-            if (!data && lastModelError) {
-              throw lastModelError;
+            if (!data) {
+              throw lastModelError || new Error("Semua model AI gagal merespons.");
             }
           }
           
-          let textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          const textResponse = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (!textResponse) {
+            throw new Error("Respons AI kosong.");
+          }
+
           const jsonMatch = textResponse.match(/\{[\s\S]*\}/);
-          const parsedData = JSON.parse(jsonMatch ? jsonMatch[0] : textResponse);
+          const cleanJson = jsonMatch ? jsonMatch[0] : textResponse.replace(/```json/gi, '').replace(/```/g, '').trim();
+          const parsedData = JSON.parse(cleanJson);
           
-          const parseToStringArray = (arr) => arr ? arr.map(String) : ["-"];
+          const parseToStringArray = (arr) => Array.isArray(arr) && arr.length > 0 ? arr.map(String) : ["-"];
 
           setResult({
-            resume: String(parsedData.resume),
-            analisis_deskriptif: String(parsedData.analisis_deskriptif),
+            resume: String(parsedData.resume || "Tidak tersedia."),
+            analisis_deskriptif: String(parsedData.analisis_deskriptif || "Tidak tersedia."),
             swot_kekuatan: parseToStringArray(parsedData.swot_kekuatan),
             swot_kelemahan: parseToStringArray(parsedData.swot_kelemahan),
             swot_peluang: parseToStringArray(parsedData.swot_peluang),
@@ -568,7 +589,7 @@
             kebijakan: parseToStringArray(parsedData.kebijakan),
             strategi_komunikasi: parseToStringArray(parsedData.strategi_komunikasi),
             rekomendasi_publikasi: parseToStringArray(parsedData.rekomendasi_publikasi),
-            kesimpulan: String(parsedData.kesimpulan),
+            kesimpulan: String(parsedData.kesimpulan || "Tidak tersedia."),
             sourceUrl: formData.sourceUrl
           });
 
