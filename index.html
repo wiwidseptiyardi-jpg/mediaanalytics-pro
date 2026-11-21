@@ -430,7 +430,7 @@
         const systemPrompt = `Analis Media & Kebijakan Publik profesional. Bedah berita mendalam. EYD Bahasa Indonesia baik (tidak kapital semua). Output JSON: {"resume": "string", "analisis_deskriptif": "string", "swot_kekuatan": ["string"], "swot_kelemahan": ["string"], "swot_peluang": ["string"], "swot_ancaman": ["string"], "kebijakan": ["string"], "strategi_komunikasi": ["string"], "rekomendasi_publikasi": ["string"], "kesimpulan": "string"}`;
 
         try {
-          let apiKey = geminiApiKey ? geminiApiKey.trim().replace(/[^A-Za-z0-9_\-]/g, "") : "";
+          let apiKey = geminiApiKey ? geminiApiKey.trim().replace(/[^A-Za-z0-9_\-\.]/g, "") : "";
           let finalTargetModel = "gemini-1.5-flash"; 
           const isCanvasEnv = typeof __app_id !== 'undefined';
           let data = null;
