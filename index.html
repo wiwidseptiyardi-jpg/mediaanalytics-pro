@@ -427,11 +427,12 @@
         setIsAnalyzing(true);
         setErrorMsg(null);
         
-        const systemPrompt = `Analis Media & Kebijakan Publik profesional. Bedah berita mendalam. EYD Bahasa Indonesia baik (tidak kapital semua). Output JSON: {"resume": "string", "analisis_deskriptif": "string", "swot_kekuatan": ["string"], "swot_kelemahan": ["string"], "swot_peluang": ["string"], "swot_ancaman": ["string"], "kebijakan": ["string"], "strategi_komunikasi": ["string"], "rekomendasi_publikasi": ["string"], "kesimpulan": "string"}`;
+        // Prompt dipadatkan agar diproses AI jauh lebih cepat namun tetap tajam & sesuai EYD
+        const systemPrompt = `Analis Media & Kebijakan Publik. Bedah berita ringkas, tajam, EYD baku. Output JSON: {"resume":"string","analisis_deskriptif":"string","swot_kekuatan":["string"],"swot_kelemahan":["string"],"swot_peluang":["string"],"swot_ancaman":["string"],"kebijakan":["string"],"strategi_komunikasi":["string"],"rekomendasi_publikasi":["string"],"kesimpulan":"string"}`;
 
         try {
           let apiKey = geminiApiKey ? geminiApiKey.trim().replace(/[^A-Za-z0-9_\-\.]/g, "") : "";
-          let finalTargetModel = "gemini-1.5-flash"; 
+          let finalTargetModel = "gemini-3.8-flash"; 
           const isCanvasEnv = typeof __app_id !== 'undefined';
           let data = null;
 
@@ -442,52 +443,84 @@
             data = await fetchWithRetry(endpointUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ contents: [{ parts: [{ text: `${systemPrompt}\n\nDATA:\nJudul: ${formData.title}\n\nIsi: ${formData.content}` }] }] })
+                body: JSON.stringify({ contents: [{ parts: [{ text: `${systemPrompt}\n\nJudul: ${formData.title}\nIsi: ${formData.content}` }] }] })
             });
           } else {
             if (!apiKey) throw new Error("API Key Gemini tidak terbaca.");
             
-            try {
-                const modelsRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
-                if (modelsRes.ok) {
-                    const modelsData = await modelsRes.json();
-                    if (modelsData.models) {
-                        const availableModels = modelsData.models
-                            .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent'))
-                            .map(m => m.name.replace('models/', ''));
-                        
-                        if (availableModels.length > 0) {
-                            // Memprioritaskan model generasi terbaru (Gemini 3.8 / 3.0) untuk API Key baru
-                            const preferredModels = [
-                                'gemini-3.8-flash',
-                                'gemini-3.5-flash',
-                                'gemini-3-flash',
-                                'gemini-3.0-flash',
-                                'gemini-2.5-flash',
-                                'gemini-1.5-flash',
-                                'gemini-1.5-pro'
-                            ];
-                            const matchedModel = preferredModels.find(m => availableModels.includes(m));
-                            if (matchedModel) {
-                                finalTargetModel = matchedModel;
-                            } else {
-                                // Pilih otomatis model flash terbaru yang tersedia di akun
-                                const latestFlash = availableModels.find(m => m.includes('flash') && !m.includes('lite') && !m.includes('8b'));
-                                finalTargetModel = latestFlash || availableModels[0];
+            // Gunakan model yang tersimpan di cache sesi (v2 untuk reset cache lama)
+            let cachedModel = sessionStorage.getItem('activeGeminiModel_v2');
+            if (cachedModel) {
+                finalTargetModel = cachedModel;
+            } else {
+                try {
+                    const modelsRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+                    if (modelsRes.ok) {
+                        const modelsData = await modelsRes.json();
+                        if (modelsData.models) {
+                            const availableModels = modelsData.models
+                                .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent'))
+                                .map(m => m.name.replace('models/', ''));
+                            
+                            if (availableModels.length > 0) {
+                                // Prioritaskan model Flash/Lite terbaru yang paling cepat merespons
+                                const preferredModels = [
+                                    'gemini-3.8-flash-lite',
+                                    'gemini-3.8-flash',
+                                    'gemini-3.5-flash-lite',
+                                    'gemini-3.5-flash',
+                                    'gemini-3-flash',
+                                    'gemini-2.5-flash-lite',
+                                    'gemini-2.5-flash',
+                                    'gemini-1.5-flash'
+                                ];
+                                const matchedModel = preferredModels.find(m => availableModels.includes(m));
+                                if (matchedModel) {
+                                    finalTargetModel = matchedModel;
+                                } else {
+                                    const anyFlash = availableModels.find(m => m.includes('flash'));
+                                    finalTargetModel = anyFlash || availableModels[0];
+                                }
+                                sessionStorage.setItem('activeGeminiModel_v2', finalTargetModel);
                             }
                         }
                     }
+                } catch (scannerErr) {
+                     console.warn("Scanner model gagal jaringan, mencoba fallback default.");
                 }
-            } catch (scannerErr) {
-                 console.warn("Scanner model gagal jaringan, mencoba fallback default.");
             }
 
             const endpointUrl = `https://generativelanguage.googleapis.com/v1beta/models/${finalTargetModel}:generateContent?key=${apiKey}`;
-            data = await fetchWithRetry(endpointUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ contents: [{ parts: [{ text: `${systemPrompt}\n\nDATA:\nJudul: ${formData.title}\n\nIsi: ${formData.content}` }] }] })
-            });
+            
+            // Payload dengan thinkingBudget: 0 untuk mematikan jeda berpikir AI agar super cepat
+            const fastPayload = { 
+              contents: [{ parts: [{ text: `${systemPrompt}\n\nJudul: ${formData.title}\nIsi: ${formData.content}` }] }],
+              generationConfig: {
+                responseMimeType: "application/json",
+                temperature: 0.3,
+                thinkingConfig: { thinkingBudget: 0 }
+              }
+            };
+
+            try {
+              data = await fetchWithRetry(endpointUrl, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(fastPayload)
+              }, 2);
+            } catch (err) {
+              // Fallback otomatis jika model spesifik tidak mendukung thinkingConfig
+              if (err.status === 400) {
+                delete fastPayload.generationConfig.thinkingConfig;
+                data = await fetchWithRetry(endpointUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(fastPayload)
+                }, 2);
+              } else {
+                throw err;
+              }
+            }
           }
           
           let textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text;
