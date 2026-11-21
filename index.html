@@ -457,10 +457,24 @@
                             .map(m => m.name.replace('models/', ''));
                         
                         if (availableModels.length > 0) {
-                            if (availableModels.includes('gemini-1.5-flash')) finalTargetModel = 'gemini-1.5-flash';
-                            else if (availableModels.includes('gemini-2.5-flash')) finalTargetModel = 'gemini-2.5-flash';
-                            else if (availableModels.includes('gemini-1.5-pro')) finalTargetModel = 'gemini-1.5-pro';
-                            else finalTargetModel = availableModels[0]; 
+                            // Memprioritaskan model generasi terbaru (Gemini 3.8 / 3.0) untuk API Key baru
+                            const preferredModels = [
+                                'gemini-3.8-flash',
+                                'gemini-3.5-flash',
+                                'gemini-3-flash',
+                                'gemini-3.0-flash',
+                                'gemini-2.5-flash',
+                                'gemini-1.5-flash',
+                                'gemini-1.5-pro'
+                            ];
+                            const matchedModel = preferredModels.find(m => availableModels.includes(m));
+                            if (matchedModel) {
+                                finalTargetModel = matchedModel;
+                            } else {
+                                // Pilih otomatis model flash terbaru yang tersedia di akun
+                                const latestFlash = availableModels.find(m => m.includes('flash') && !m.includes('lite') && !m.includes('8b'));
+                                finalTargetModel = latestFlash || availableModels[0];
+                            }
                         }
                     }
                 }
